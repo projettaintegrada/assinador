@@ -1,0 +1,59 @@
+# Compila o Projetta Assinador (Windows) e publica o site no GitHub Pages.
+name: Compilar e publicar
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  programa:
+    name: Compilar o programa do Windows
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Descobrir o endereço do site
+        shell: bash
+        run: echo "ORIGEM=https://${GITHUB_REPOSITORY_OWNER,,}.github.io" >> "$GITHUB_ENV"
+
+      - name: Compilar
+        run: dotnet build agente/ProjettaAssinador.csproj -c Release -o saida "-p:OrigemSite=${{ env.ORIGEM }}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ProjettaAssinador
+          path: saida/ProjettaAssinador.exe
+
+  site:
+    name: Publicar o site
+    needs: programa
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.publicar.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: ProjettaAssinador
+          path: site/instalar
+
+      - uses: actions/configure-pages@v5
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+      - id: publicar
+        uses: actions/deploy-pages@v4
