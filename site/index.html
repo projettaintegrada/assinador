@@ -87,6 +87,12 @@
   .modos { display: grid; grid-template-columns: 1fr 1fr; border: 1px solid var(--linha); border-radius: 8px; padding: 3px; gap: 3px; background: var(--superficie); }
   .modos button { font: inherit; font-size: .82rem; padding: 8px 6px; border: 0; border-radius: 6px; background: transparent; color: var(--suave); cursor: pointer; }
   .modos button[aria-selected="true"] { background: var(--papel); color: var(--texto); font-weight: 600; box-shadow: 0 0 0 1px var(--linha); }
+  .busca { display: grid; gap: 4px; }
+  .busca input { width: 100%; font: inherit; font-size: .9rem; color: var(--texto); background: var(--papel);
+          border: 1px solid var(--linha); border-radius: 8px; padding: 9px 10px 9px 34px;
+          background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' fill='none' stroke='%23888' stroke-width='2'%3E%3Ccircle cx='7' cy='7' r='5'/%3E%3Cpath d='M11 11l4 4'/%3E%3C/svg%3E");
+          background-repeat: no-repeat; background-position: 11px center; }
+  .busca input:focus-visible { outline: 2px solid var(--lacre); outline-offset: 1px; }
   .lista { display: grid; gap: 6px; max-height: 260px; overflow-y: auto; }
   .cert { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 2px 10px; align-items: start; text-align: left; font: inherit;
           padding: 10px; border: 1px solid var(--linha); border-radius: 8px; background: var(--superficie); color: var(--texto); cursor: pointer; }
@@ -164,6 +170,10 @@
         </div>
         <div id="painelLocal" class="grupo">
           <p id="agenteStatus">Procurando o Projetta Assinador neste computador…</p>
+          <div id="buscaCerts" class="busca" hidden>
+            <input type="search" id="busca" placeholder="Pesquisar por nome, CPF, CNPJ, A1 ou A3" autocomplete="off" aria-label="Pesquisar certificado">
+            <span id="buscaInfo" class="dica"></span>
+          </div>
           <div id="listaCerts" class="lista" role="radiogroup" aria-label="Certificados do computador" hidden></div>
           <div id="semAgente" class="grupo" hidden>
             <a class="botao-link" href="instalar/ProjettaAssinador.exe" download>Baixar o Projetta Assinador</a>
@@ -655,10 +665,33 @@ $('modoLocal').addEventListener('click', () => escolherModo('local'));
 $('modoArquivo').addEventListener('click', () => escolherModo('arquivo'));
 $('procurar').addEventListener('click', () => procurarCertificados());
 
+// ---- Pesquisa na lista de certificados ----
+const normalizar = (t) => String(t).normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase();
+const soDigitos = (t) => String(t).replace(/\D/g, '');
+
+function filtrarCertificados() {
+  const termo = normalizar($('busca').value.trim());
+  const digitos = soDigitos(termo);
+  const palavras = termo.split(/\s+/).filter(Boolean);
+  const itens = [...$('listaCerts').querySelectorAll('.cert')];
+  let visiveis = 0;
+  for (const b of itens) {
+    const texto = b.dataset.busca;
+    const ok = !palavras.length
+      || palavras.every(p => texto.includes(p))
+      || (digitos.length >= 3 && soDigitos(texto).includes(digitos));
+    b.hidden = !ok;
+    if (ok) visiveis++;
+  }
+  $('buscaInfo').textContent = !palavras.length ? `${itens.length} certificados`
+    : visiveis ? `${visiveis} de ${itens.length} certificados` : 'Nenhum certificado encontrado';
+}
+$('busca').addEventListener('input', filtrarCertificados);
+
 async function procurarCertificados() {
   const info = $('agenteStatus'), lista = $('listaCerts');
   info.textContent = 'Procurando o Projetta Assinador neste computador…';
-  lista.hidden = true; $('semAgente').hidden = true;
+  lista.hidden = true; $('semAgente').hidden = true; $('buscaCerts').hidden = true;
   try {
     await chamarAgente('/api/status', {}, 2500);
   } catch {
@@ -683,6 +716,7 @@ async function procurarCertificados() {
       b.querySelector('.tipo').textContent = c.tipo;
       b.querySelector('.nome').textContent = c.nome;
       b.querySelector('.det').textContent = `${c.emissor} · válido até ${d}/${m}/${a}`;
+      b.dataset.busca = normalizar([c.nome, c.emissor, c.tipo, c.validade].join(' '));
       b.addEventListener('click', () => {
         estado.certLocal = c;
         lista.querySelectorAll('.cert').forEach(x => x.setAttribute('aria-checked', String(x === b)));
@@ -691,6 +725,8 @@ async function procurarCertificados() {
     }
     if (certificados.length === 1) lista.firstChild.click();
     lista.hidden = false;
+    $('buscaCerts').hidden = certificados.length < 2;
+    filtrarCertificados();
   } catch (e) {
     info.textContent = e.message || 'Não consegui ler os certificados.';
   }
