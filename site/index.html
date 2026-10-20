@@ -79,6 +79,11 @@
           background: transparent; color: var(--ok); border: 2px solid var(--ok); }
   button:disabled { opacity: .55; cursor: wait; }
   .grupo { display: grid; gap: 8px; }
+  .tamanho { display: grid; gap: 4px; margin-top: 4px; }
+  .regua { display: grid; grid-template-columns: 34px minmax(0, 1fr) 34px 3.2em; align-items: center; gap: 8px; }
+  .regua input { width: 100%; accent-color: var(--lacre); }
+  .regua button { font: inherit; font-size: 1.1rem; height: 34px; border-radius: 8px; border: 1px solid var(--linha); background: var(--papel); color: var(--texto); cursor: pointer; }
+  .regua output { font-family: var(--f-mono); font-size: .82rem; text-align: right; font-variant-numeric: tabular-nums; color: var(--suave); }
   .modos { display: grid; grid-template-columns: 1fr 1fr; border: 1px solid var(--linha); border-radius: 8px; padding: 3px; gap: 3px; background: var(--superficie); }
   .modos button { font: inherit; font-size: .82rem; padding: 8px 6px; border: 0; border-radius: 6px; background: transparent; color: var(--suave); cursor: pointer; }
   .modos button[aria-selected="true"] { background: var(--papel); color: var(--texto); font-weight: 600; box-shadow: 0 0 0 1px var(--linha); }
@@ -142,6 +147,15 @@
         <h2><span class="num">2</span>Local do carimbo</h2>
         <p>Toque na página, ao lado, onde a assinatura deve aparecer.</p>
         <span class="chip" id="posicao">Ainda não escolhido</span>
+        <div class="tamanho">
+          <label class="dica" for="tamanho">Tamanho do carimbo</label>
+          <div class="regua">
+            <button type="button" id="menor" aria-label="Diminuir carimbo">−</button>
+            <input type="range" id="tamanho" min="50" max="250" step="10" value="100">
+            <button type="button" id="maior" aria-label="Aumentar carimbo">+</button>
+            <output id="tamValor" for="tamanho">100%</output>
+          </div>
+        </div>
       </div>
       <div class="passo">
         <h2><span class="num">3</span>Certificado</h2>
@@ -275,7 +289,7 @@ function pdfJaAssinado(bytes) {
   return new TextDecoder('latin1').decode(bytes).includes('/ByteRange');
 }
 
-// posicao = { pagina (0-based), x, y } = canto inferior esquerdo do carimbo, em pontos PDF
+// posicao = { pagina (0-based), x, y, escala } = canto inferior esquerdo do carimbo, em pontos PDF; escala 1 = 240 x 72 pt
 function quebrarTexto(texto, f, s, larg) {
   const linhas = []; let atual = '';
   const cabe = (t) => f.widthOfTextAtSize(t, s) <= larg;
@@ -320,16 +334,16 @@ async function prepararPdf(bytes, info, posicao) {
   // Aparência visível do carimbo: nome grande à esquerda, detalhes à direita, logomarca ao fundo
   const fonte = await pdf.embedFont(L.StandardFonts.Helvetica);
   const logo = await pdf.embedPng(Uint8Array.from(atob(LOGO_MARCA.split(',')[1]), c => c.charCodeAt(0)));
-  const { w: W, h: H } = CARIMBO;
+  const k = posicao.escala || 1, W = CARIMBO.w * k, H = CARIMBO.h * k;
   const zero = L.degrees(0), preto = L.rgb(0, 0, 0);
   const seguro = (t) => { try { fonte.encodeText(t); return t; } catch { return [...t].map(ch => { try { fonte.encodeText(ch); return ch; } catch { return ch.normalize('NFD').replace(/[^\x20-\x7e]/g, '') || '?'; } }).join(''); } };
 
   const logoH = H * 0.9, logoW = logoH * logo.width / logo.height;
   const ops = [...L.drawImage('Logo', { x: (W - logoW) / 2, y: (H - logoH) / 2, width: logoW, height: logoH, rotate: zero, xSkew: zero, ySkew: zero })];
 
-  const colE = { x: 3, w: W * 0.45 - 6 }, colD = { x: W * 0.45 + 2, w: W * 0.55 - 5 };
+  const colE = { x: 3 * k, w: W * 0.45 - 6 * k }, colD = { x: W * 0.45 + 2 * k, w: W * 0.55 - 5 * k };
   // Coluna esquerda: nome do titular, o maior possível
-  const grande = ajustarTexto([seguro(info.cn)], fonte, colE.w, H - 6, 16, 5, 1.12);
+  const grande = ajustarTexto([seguro(info.cn)], fonte, colE.w, H - 6 * k, 16 * k, 3, 1.12);
   let topo = H / 2 + grande.linhas.length * grande.s * 1.12 / 2;
   grande.linhas.forEach((t, i) => {
     const x = colE.x + (colE.w - fonte.widthOfTextAtSize(t, grande.s)) / 2;
@@ -344,7 +358,7 @@ async function prepararPdf(bytes, info, posicao) {
     'Data: ' + dataPdf(new Date()),
     'Verifique em validar.iti.gov.br',
   ].filter(Boolean).map(seguro);
-  const miudo = ajustarTexto(paragrafos, fonte, colD.w, H - 4, 6.5, 3, 1.15);
+  const miudo = ajustarTexto(paragrafos, fonte, colD.w, H - 4 * k, 6.5 * k, 2, 1.15);
   topo = H / 2 + miudo.linhas.length * miudo.s * 1.15 / 2;
   miudo.linhas.forEach((t, i) => {
     ops.push(...L.drawText(fonte.encodeText(t), { x: colD.x, y: topo - miudo.s * 0.85 - i * miudo.s * 1.15, size: miudo.s, font: 'F1', color: preto, rotate: zero, xSkew: zero, ySkew: zero }));
@@ -480,7 +494,7 @@ async function assinarPdf(pdfBytes, cert, posicao, extras) {
 const $ = (id) => document.getElementById(id);
 pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
 
-const estado = { bytes: null, nome: '', exemplo: false, doc: null, pagina: 1, viewport: null, view: null, posicao: null, assinado: null };
+const estado = { escala: 1, bytes: null, nome: '', exemplo: false, doc: null, pagina: 1, viewport: null, view: null, posicao: null, assinado: null };
 let tarefaRender = null;
 const downloadsPronto = (window.claude && window.claude.use) ? window.claude.use('downloads').catch(() => null) : Promise.resolve(null);
 
@@ -497,7 +511,7 @@ async function abrirDocumento(bytes, nome, exemplo) {
   // Posição inicial: canto inferior esquerdo da última página
   const ultima = await estado.doc.getPage(estado.doc.numPages);
   const [x0, y0] = ultima.view;
-  estado.posicao = { pagina: estado.doc.numPages - 1, x: x0 + 40, y: y0 + 40 };
+  estado.posicao = { pagina: estado.doc.numPages - 1, x: x0 + 40, y: y0 + 40, escala: estado.escala, view: ultima.view };
   estado.pagina = estado.doc.numPages;
   atualizarChip(false);
   await renderizar();
@@ -529,7 +543,7 @@ function desenharCarimbo() {
   if (!p || !vp || p.pagina !== estado.pagina - 1) { c.hidden = true; return; }
   const tela = $('tela');
   const fator = tela.clientWidth / vp.width;   // canvas pode encolher com max-width
-  const [a, b, d, e] = vp.convertToViewportRectangle([p.x, p.y, p.x + CARIMBO.w, p.y + CARIMBO.h]);
+  const [a, b, d, e] = vp.convertToViewportRectangle([p.x, p.y, p.x + CARIMBO.w * p.escala, p.y + CARIMBO.h * p.escala]);
   const esq = Math.min(a, d) * fator, topo = Math.min(b, e) * fator;
   const larg = Math.abs(d - a) * fator, alt = Math.abs(e - b) * fator;
   Object.assign(c.style, { left: esq + 'px', top: topo + 'px', width: larg + 'px', height: alt + 'px', fontSize: (alt / 9) + 'px' });
@@ -555,13 +569,36 @@ $('tela').addEventListener('click', (ev) => {
   const tela = $('tela'), r = tela.getBoundingClientRect();
   const fator = vp.width / r.width;
   const [px, py] = vp.convertToPdfPoint((ev.clientX - r.left) * fator, (ev.clientY - r.top) * fator);
-  const [x0, y0, x1, y1] = estado.view;
-  const x = Math.min(Math.max(px - CARIMBO.w / 2, x0), x1 - CARIMBO.w);
-  const y = Math.min(Math.max(py - CARIMBO.h / 2, y0), y1 - CARIMBO.h);
-  estado.posicao = { pagina: estado.pagina - 1, x, y };
+  estado.posicao = { pagina: estado.pagina - 1, escala: estado.escala, view: estado.view };
+  centralizar(px, py);
   estado.assinado = null; $('salvar').hidden = true;
   atualizarChip(true); desenharCarimbo();
 });
+
+// Coloca o centro do carimbo em (cx, cy), sem sair da página
+function centralizar(cx, cy) {
+  const p = estado.posicao, w = CARIMBO.w * p.escala, h = CARIMBO.h * p.escala;
+  const [x0, y0, x1, y1] = p.view;
+  p.x = Math.max(x0, Math.min(cx - w / 2, x1 - w));
+  p.y = Math.max(y0, Math.min(cy - h / 2, y1 - h));
+}
+
+function mudarTamanho(pct) {
+  pct = Math.max(50, Math.min(250, pct));
+  $('tamanho').value = pct; $('tamValor').textContent = pct + '%';
+  estado.escala = pct / 100;
+  const p = estado.posicao;
+  if (p) {
+    const cx = p.x + CARIMBO.w * p.escala / 2, cy = p.y + CARIMBO.h * p.escala / 2;
+    p.escala = estado.escala;
+    centralizar(cx, cy);
+    estado.assinado = null; $('salvar').hidden = true;
+    desenharCarimbo();
+  }
+}
+$('tamanho').addEventListener('input', () => mudarTamanho(+$('tamanho').value));
+$('menor').addEventListener('click', () => mudarTamanho(+$('tamanho').value - 10));
+$('maior').addEventListener('click', () => mudarTamanho(+$('tamanho').value + 10));
 
 ['motivo', 'local'].forEach(id => $(id).addEventListener('input', desenharCarimbo));
 $('ant').addEventListener('click', () => { if (estado.pagina > 1) { estado.pagina--; renderizar(); } });
