@@ -1,0 +1,37 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- Projetta Assinador: programa do Windows que lê os certificados instalados
+       (A1 e tokens/cartões A3) e assina a pedido do site da Projetta.
+       Usa o .NET Framework 4.8, que já vem no Windows 10 e 11: o cliente não instala mais nada. -->
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net48</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <LangVersion>latest</LangVersion>
+    <Nullable>disable</Nullable>
+    <AssemblyName>ProjettaAssinador</AssemblyName>
+    <RootNamespace>ProjettaAssinador</RootNamespace>
+    <ApplicationIcon>projetta.ico</ApplicationIcon>
+    <Version>1.0.0</Version>
+    <Product>Projetta Assinador</Product>
+    <Company>Projetta</Company>
+    <Copyright>Projetta</Copyright>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+    <!-- Endereço do site autorizado a usar o assinador. A automação do GitHub preenche sozinha. -->
+    <OrigemSite Condition="'$(OrigemSite)' == ''">https://SEU-USUARIO.github.io</OrigemSite>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Reference Include="System.Web.Extensions" />
+    <Reference Include="System.Security" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <AssemblyAttribute Include="System.Reflection.AssemblyMetadataAttribute">
+      <_Parameter1>OrigemSite</_Parameter1>
+      <_Parameter2>$(OrigemSite)</_Parameter2>
+    </AssemblyAttribute>
+  </ItemGroup>
+
+</Project>
