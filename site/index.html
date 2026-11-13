@@ -332,12 +332,24 @@ async function prepararPdf(bytes, info, posicao) {
   const L = PDFLib;
   const { PDFDocument, PDFName, PDFNumber, PDFHexString, PDFString, PDFArray, PDFDict } = L;
   let pdf;
-  try { pdf = await PDFDocument.load(bytes); }
+  // updateMetadata: false -> o pdf-lib não mexe no /Info (não precisamos regravá-lo)
+  try { pdf = await PDFDocument.load(bytes, { updateMetadata: false }); }
   catch (e) {
     if (/encrypt/i.test(String(e && e.message))) throw new Error('Este PDF está protegido por senha. Remova a proteção antes de assinar.');
     throw new Error('Não consegui ler este PDF. O arquivo pode estar corrompido.');
   }
   const ctx = pdf.context;
+  if (documentoBloqueado(pdf)) throw new Error('Este PDF foi certificado pelo autor sem permitir alterações. Uma nova assinatura invalidaria a anterior.');
+
+  // Tudo com número maior que este é objeto novo. Objetos antigos que mudarem entram em "alterados".
+  // Só esses vão para o fim do arquivo (atualização incremental); os bytes originais não são tocados,
+  // e por isso as assinaturas que já existem continuam válidas.
+  // Números livres na tabela antiga não podem ser reaproveitados: começa depois do /Size anterior
+  const sizes = [...new TextDecoder('latin1').decode(bytes).matchAll(/\/Size\s+(\d+)/g)].map(x => Number(x[1]));
+  if (sizes.length) ctx.largestObjectNumber = Math.max(ctx.largestObjectNumber, ...sizes.map(n => n - 1));
+  const maiorAntes = ctx.largestObjectNumber;
+  const alterados = [];
+  const refDe = (dict, nome) => { const v = dict.get(PDFName.of(nome)); return v instanceof L.PDFRef ? v : null; };
 
   // Aparência visível do carimbo: nome grande à esquerda, detalhes à direita, logomarca ao fundo
   const fonte = await pdf.embedFont(L.StandardFonts.Helvetica);
@@ -400,14 +412,124 @@ async function prepararPdf(bytes, info, posicao) {
   }));
   const anot = pagina.node.lookupMaybe(PDFName.of('Annots'), PDFArray);
   if (anot) anot.push(campo); else pagina.node.set(PDFName.of('Annots'), ctx.obj([campo]));
+  alterados.push(refDe(pagina.node, 'Annots') || pagina.ref);
 
+  const catalogoRef = ctx.trailerInfo.Root;
   let form = pdf.catalog.lookupMaybe(PDFName.of('AcroForm'), PDFDict);
-  if (!form) { form = ctx.obj({}); pdf.catalog.set(PDFName.of('AcroForm'), form); }
+  if (!form) { form = ctx.obj({}); pdf.catalog.set(PDFName.of('AcroForm'), ctx.register(form)); alterados.push(catalogoRef); }
+  const formRef = refDe(pdf.catalog, 'AcroForm');
   form.set(PDFName.of('SigFlags'), PDFNumber.of(3));
+  // NeedAppearances faz o leitor redesenhar os campos, o que aparece como "documento alterado"
+  if (form.has(PDFName.of('NeedAppearances'))) form.delete(PDFName.of('NeedAppearances'));
   const campos = form.lookupMaybe(PDFName.of('Fields'), PDFArray);
   if (campos) campos.push(campo); else form.set(PDFName.of('Fields'), ctx.obj([campo]));
+  alterados.push(formRef || catalogoRef);              // SigFlags/Fields mudaram no AcroForm
+  alterados.push(refDe(form, 'Fields'));               // se a lista de campos for objeto separado
 
-  return await pdf.save({ useObjectStreams: false });
+  await pdf.flush(); // grava no contexto a fonte e a imagem do carimbo
+  return salvarIncremental(bytes, ctx, maiorAntes, alterados);
+}
+
+// Certificação com /DocMDP P=1 = "nenhuma alteração permitida"
+function documentoBloqueado(pdf) {
+  const { PDFName, PDFDict, PDFNumber } = PDFLib;
+  const perms = pdf.catalog.lookupMaybe(PDFName.of('Perms'), PDFDict);
+  const sig = perms && perms.lookupMaybe(PDFName.of('DocMDP'), PDFDict);
+  const refs = sig && sig.lookupMaybe(PDFName.of('Reference'), PDFLib.PDFArray);
+  if (!refs) return false;
+  for (let i = 0; i < refs.size(); i++) {
+    const r = refs.lookup(i, PDFDict);
+    const p = r.lookupMaybe(PDFName.of('TransformParams'), PDFDict);
+    const n = p && p.lookupMaybe(PDFName.of('P'), PDFNumber);
+    if (n && n.asNumber() === 1) return true;
+  }
+  return false;
+}
+
+// Acrescenta ao final do PDF original só os objetos novos e os alterados, com uma nova tabela
+// de referências que aponta (/Prev) para a anterior. É assim que leitores e validadores
+// (Adobe, ITI) enxergam várias assinaturas no mesmo arquivo.
+function salvarIncremental(original, ctx, maiorAntes, alterados) {
+  const { PDFRef, PDFName, PDFNumber, PDFArray, PDFRawStream } = PDFLib;
+  const latin1 = (s) => Uint8Array.from(s, c => c.charCodeAt(0) & 0xff);
+  const textoOrig = new TextDecoder('latin1').decode(original.subarray(Math.max(0, original.length - 2048)));
+  const m = /startxref\s+(\d+)\s*%%EOF\s*$/.exec(textoOrig) || [...textoOrig.matchAll(/startxref\s+(\d+)/g)].pop();
+  if (!m) throw new Error('Não encontrei a tabela de referências deste PDF.');
+  const xrefAnterior = Number(m[1]);
+  // O PDF original usa tabela "xref" clássica ou xref em stream (PDF 1.5+)? A nova segue o mesmo tipo.
+  const usaStream = !/^\s*xref/.test(new TextDecoder('latin1').decode(original.subarray(xrefAnterior, xrefAnterior + 20)));
+
+  // Objetos a gravar: alterados + todos os novos, sem repetir
+  const vistos = new Set(), refs = [];
+  const add = (r) => { if (r && !vistos.has(r.tag) && ctx.lookup(r)) { vistos.add(r.tag); refs.push(r); } };
+  alterados.forEach(add);
+  ctx.enumerateIndirectObjects().forEach(([r]) => { if (r.objectNumber > maiorAntes) add(r); });
+
+  const partes = []; let pos = original.length;
+  const escrever = (b) => { partes.push(b); pos += b.length; };
+  if (original[original.length - 1] !== 0x0a) escrever(latin1('\n'));
+
+  const offsets = new Map();
+  for (const r of refs) {
+    const obj = ctx.lookup(r);
+    offsets.set(r.objectNumber, { pos, gen: r.generationNumber });
+    escrever(latin1(`${r.objectNumber} ${r.generationNumber} obj\n`));
+    const buf = new Uint8Array(obj.sizeInBytes());
+    obj.copyBytesInto(buf, 0);
+    escrever(buf);
+    escrever(latin1('\nendobj\n'));
+  }
+
+  const t = ctx.trailerInfo;
+  const tamanho = Math.max(maiorAntes, ...refs.map(r => r.objectNumber)) + 1 + (usaStream ? 1 : 0);
+  const trailer = { Size: tamanho, Root: t.Root, Prev: xrefAnterior };
+  if (t.Info) trailer.Info = t.Info;
+  if (t.ID) trailer.ID = t.ID;
+
+  // Agrupa os números de objeto em blocos contínuos (subseções da tabela)
+  const blocos = (nums) => {
+    const ord = [...nums].sort((a, b) => a - b), out = [];
+    for (const n of ord) { const b = out[out.length - 1]; if (b && n === b[0] + b[1]) b[1]++; else out.push([n, 1]); }
+    return out;
+  };
+
+  const inicioXref = pos;
+  if (!usaStream) {
+    let s = 'xref\n';
+    for (const [ini, qtd] of blocos(offsets.keys())) {
+      s += `${ini} ${qtd}\n`;
+      for (let n = ini; n < ini + qtd; n++) {
+        const o = offsets.get(n);
+        s += `${String(o.pos).padStart(10, '0')} ${String(o.gen).padStart(5, '0')} n\r\n`;
+      }
+    }
+    const dict = ctx.obj(trailer);
+    s += 'trailer\n' + dict.toString() + '\n';
+    escrever(latin1(s));
+  } else {
+    const numXref = tamanho - 1;
+    offsets.set(numXref, { pos: inicioXref, gen: 0 });
+    const bs = blocos(offsets.keys());
+    const dados = new Uint8Array(offsets.size * 7); let k = 0;
+    for (const [ini, qtd] of bs) for (let n = ini; n < ini + qtd; n++) {
+      const o = offsets.get(n);
+      dados[k++] = 1;
+      dados[k++] = (o.pos >>> 24) & 255; dados[k++] = (o.pos >>> 16) & 255; dados[k++] = (o.pos >>> 8) & 255; dados[k++] = o.pos & 255;
+      dados[k++] = (o.gen >>> 8) & 255; dados[k++] = o.gen & 255;
+    }
+    const dict = ctx.obj({ ...trailer, Type: 'XRef', W: [1, 4, 2], Index: bs.flat(), Length: dados.length });
+    const stream = PDFRawStream.of(dict, dados);
+    escrever(latin1(`${numXref} 0 obj\n`));
+    const buf = new Uint8Array(stream.sizeInBytes()); stream.copyBytesInto(buf, 0); escrever(buf);
+    escrever(latin1('\nendobj\n'));
+  }
+  escrever(latin1(`startxref\n${inicioXref}\n%%EOF\n`));
+
+  const saida = new Uint8Array(pos);
+  saida.set(original, 0);
+  let p = original.length;
+  for (const b of partes) { saida.set(b, p); p += b.length; }
+  return saida;
 }
 
 // ---- Montagem da assinatura CMS no padrão PAdES ----
@@ -619,7 +741,7 @@ $('pdf').addEventListener('change', async () => {
   try {
     const bytes = await ler(f);
     await abrirDocumento(bytes, f.name, false);
-    if (pdfJaAssinado(bytes)) status('Atenção: este PDF já tem uma assinatura. Assinar de novo vai invalidar a assinatura anterior.', 'erro');
+    if (pdfJaAssinado(bytes)) status('Este PDF já tem assinatura. A nova assinatura será acrescentada e as anteriores continuam válidas.', 'ok');
   } catch (e) { console.error(e); status('Não consegui abrir este PDF. Confira se o arquivo não está corrompido.', 'erro'); }
 });
 
