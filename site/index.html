@@ -101,6 +101,15 @@
           border: 1px solid currentColor; color: var(--lacre); }
   .cert .nome { font-weight: 600; font-size: .86rem; overflow-wrap: anywhere; }
   .cert .det { font-size: .78rem; color: var(--suave); overflow-wrap: anywhere; }
+  .fila { display: grid; gap: 6px; max-height: 240px; overflow-y: auto; }
+  .doc { display: grid; gap: 2px; text-align: left; font: inherit; padding: 8px 10px; border: 1px solid var(--linha); border-radius: 8px;
+          background: var(--superficie); color: var(--texto); cursor: pointer; }
+  .doc[aria-current="true"] { border-color: var(--lacre); box-shadow: 0 0 0 1px var(--lacre); }
+  .doc .nome { font-weight: 600; font-size: .84rem; overflow-wrap: anywhere; }
+  .doc .det { font-size: .76rem; color: var(--suave); }
+  .doc[data-estado="definido"] .det { color: var(--lacre); }
+  .doc[data-estado="ok"] .det { color: var(--ok); }
+  .doc[data-estado="erro"] .det { color: var(--erro); }
   .botao-link { display: block; text-align: center; padding: 11px; border-radius: 8px; background: var(--lacre); color: #fff; font-weight: 600; text-decoration: none; }
   button.leve { font: inherit; font-size: .85rem; padding: 8px; border: 1px dashed var(--linha); border-radius: 8px; background: transparent; color: var(--suave); cursor: pointer; }
   #agenteStatus { font-size: .86rem; color: var(--suave); margin: 0; }
@@ -146,11 +155,13 @@
     <section class="painel" aria-label="Passos da assinatura">
       <div class="passo">
         <h2><span class="num">1</span>Documento</h2>
-        <input type="file" id="pdf" accept="application/pdf,.pdf">
+        <input type="file" id="pdf" accept="application/pdf,.pdf" multiple>
+        <p class="dica" id="dicaLote">Para assinar em lote, selecione vários PDFs de uma vez (segure Ctrl ao clicar).</p>
+        <div id="fila" class="fila" aria-label="Documentos do lote" hidden></div>
       </div>
       <div class="passo">
         <h2><span class="num">2</span>Local do carimbo</h2>
-        <p>Toque na página, ao lado, onde a assinatura deve aparecer.</p>
+        <p id="dicaCarimbo">Toque na página, ao lado, onde a assinatura deve aparecer.</p>
         <span class="chip" id="posicao">Ainda não escolhido</span>
         <div class="tamanho">
           <label class="dica" for="tamanho">Tamanho do carimbo</label>
@@ -170,6 +181,8 @@
         </div>
         <div id="painelLocal" class="grupo">
           <p id="agenteStatus">Procurando o Projetta Assinador neste computador…</p>
+          <p id="agenteVelho" class="dica" hidden>Há uma versão nova do Projetta Assinador, que confirma o lote inteiro de uma vez.
+            <a href="instalar/ProjettaAssinador.exe" download>Baixe aqui</a> e abra o arquivo baixado; ele oferece fechar a versão antiga.</p>
           <div id="buscaCerts" class="busca" hidden>
             <input type="search" id="busca" placeholder="Pesquisar por nome, CPF, CNPJ, A1 ou A3" autocomplete="off" aria-label="Pesquisar certificado">
             <span id="buscaInfo" class="dica"></span>
@@ -205,6 +218,11 @@
     <section class="visor" aria-label="Documento">
       <div class="barra">
         <div class="arquivo" id="nomeArquivo"></div>
+        <div class="nav" id="navArquivo" hidden>
+          <button id="arqAnt" aria-label="Arquivo anterior">«</button>
+          <span id="arqInfo"></span>
+          <button id="arqProx" aria-label="Próximo arquivo">»</button>
+        </div>
         <div class="nav">
           <button id="ant" aria-label="Página anterior">‹</button>
           <span id="pagInfo">– / –</span>
@@ -273,9 +291,15 @@ async function chamarAgente(caminho, opcoes, limiteMs) {
   const ctl = new AbortController();
   const t = limiteMs ? setTimeout(() => ctl.abort(), limiteMs) : null;
   try {
-    const r = await fetch(AGENTE + caminho, { ...opcoes, signal: ctl.signal });
+    let r;
+    try { r = await fetch(AGENTE + caminho, { ...opcoes, signal: ctl.signal }); }
+    catch (e) { const x = new Error('Não consegui falar com o Projetta Assinador. Confira se ele está aberto (ícone perto do relógio).'); x.doAgente = true; throw x; }
     const corpo = await r.json().catch(() => ({}));
-    if (!r.ok) throw new Error(corpo.erro || ('O Projetta Assinador respondeu com erro ' + r.status + '.'));
+    if (!r.ok) {
+      const e = new Error(corpo.erro || ('O Projetta Assinador respondeu com erro ' + r.status + '.'));
+      e.status = r.status; e.codigo = corpo.codigo; e.doAgente = true;
+      throw e;
+    }
     return corpo;
   } finally { if (t) clearTimeout(t); }
 }
@@ -283,14 +307,69 @@ async function chamarAgente(caminho, opcoes, limiteMs) {
 function certificadoDoAgente(item) {
   const certs = item.cadeia.map(b64 => forge.pki.certificateFromAsn1(forge.asn1.fromDer(forge.util.decode64(b64))));
   const certTitular = certs[0];
-  const assinar = async (dados) => {
-    const r = await chamarAgente('/api/assinar', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ id: item.id, dados: forge.util.encode64(dados) }),
-    });
+  const post = (caminho, corpo) => chamarAgente(caminho, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(corpo),
+  });
+  const cert = { certTitular, certs, doAgente: true, lote: null, ...dadosTitular(certTitular) };
+  cert.assinar = async (dados) => {
+    const r = await post('/api/assinar', { id: item.id, dados: forge.util.encode64(dados), ...(cert.lote ? { lote: cert.lote } : {}) });
     return forge.util.decode64(r.assinatura);
   };
-  return { certTitular, certs, assinar, ...dadosTitular(certTitular) };
+  // Uma confirmação para vários documentos. Devolve false se o Projetta Assinador for antigo (sem lote).
+  cert.iniciarLote = async (nomes) => {
+    try { cert.lote = (await post('/api/lote', { id: item.id, arquivos: nomes })).lote; return true; }
+    catch (e) { if (e.status === 404 && !e.codigo && /rota/i.test(e.message)) return false; throw e; }
+  };
+  cert.encerrarLote = async () => {
+    if (!cert.lote) return;
+    const l = cert.lote; cert.lote = null;
+    try { await post('/api/lote/fim', { lote: l }); } catch { }
+  };
+  return cert;
+}
+
+// ---- Arquivo .zip (sem compressão: PDF já é compactado) ----
+const TABELA_CRC = Array.from({ length: 256 }, (_, n) => { let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xEDB88320 ^ (c >>> 1) : c >>> 1; return c >>> 0; });
+function crc32(b) { let c = 0xFFFFFFFF; for (let i = 0; i < b.length; i++) c = TABELA_CRC[(c ^ b[i]) & 255] ^ (c >>> 8); return (c ^ 0xFFFFFFFF) >>> 0; }
+
+// arquivos = [{ nome, dados: Uint8Array }] -> Blob .zip
+function criarZip(arquivos) {
+  const enc = new TextEncoder(), d = new Date();
+  const hora = (d.getHours() << 11) | (d.getMinutes() << 5) | (d.getSeconds() >> 1);
+  const dia = ((d.getFullYear() - 1980) << 9) | ((d.getMonth() + 1) << 5) | d.getDate();
+  const locais = [], central = []; let pos = 0;
+  for (const a of arquivos) {
+    const nome = enc.encode(a.nome), crc = crc32(a.dados), n = a.dados.length;
+    const h = new DataView(new ArrayBuffer(30));
+    h.setUint32(0, 0x04034b50, true); h.setUint16(4, 20, true); h.setUint16(6, 0x0800, true); // 0x0800 = nome em UTF-8
+    h.setUint16(10, hora, true); h.setUint16(12, dia, true);
+    h.setUint32(14, crc, true); h.setUint32(18, n, true); h.setUint32(22, n, true); h.setUint16(26, nome.length, true);
+    const c = new DataView(new ArrayBuffer(46));
+    c.setUint32(0, 0x02014b50, true); c.setUint16(4, 20, true); c.setUint16(6, 20, true); c.setUint16(8, 0x0800, true);
+    c.setUint16(12, hora, true); c.setUint16(14, dia, true);
+    c.setUint32(16, crc, true); c.setUint32(20, n, true); c.setUint32(24, n, true); c.setUint16(28, nome.length, true);
+    c.setUint32(42, pos, true);
+    locais.push(new Uint8Array(h.buffer), nome, a.dados);
+    central.push(new Uint8Array(c.buffer), nome);
+    pos += 30 + nome.length + n;
+  }
+  const tam = central.reduce((s, b) => s + b.length, 0);
+  const fim = new DataView(new ArrayBuffer(22));
+  fim.setUint32(0, 0x06054b50, true); fim.setUint16(8, arquivos.length, true); fim.setUint16(10, arquivos.length, true);
+  fim.setUint32(12, tam, true); fim.setUint32(16, pos, true);
+  return new Blob([...locais, ...central, new Uint8Array(fim.buffer)], { type: 'application/zip' });
+}
+
+// Nomes "_assinado.pdf" sem repetir dentro do .zip
+function nomesAssinados(nomes) {
+  const usados = new Set();
+  return nomes.map(n => {
+    const base = n.replace(/\.pdf$/i, '') + '_assinado';
+    let nome = base + '.pdf', k = 2;
+    while (usados.has(nome.toLowerCase())) nome = `${base} (${k++}).pdf`;
+    usados.add(nome.toLowerCase());
+    return nome;
+  });
 }
 
 function pdfJaAssinado(bytes) {
@@ -624,27 +703,97 @@ async function assinarPdf(pdfBytes, cert, posicao, extras) {
 const $ = (id) => document.getElementById(id);
 pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
 
-const estado = { escala: 1, bytes: null, nome: '', exemplo: false, doc: null, pagina: 1, viewport: null, view: null, posicao: null, assinado: null };
+const estado = { escala: 1, bytes: null, nome: '', exemplo: false, doc: null, pagina: 1, viewport: null, view: null, posicao: null, assinado: null,
+                 arquivos: [], atual: -1, avisouSugeridas: false };
 let tarefaRender = null;
 const downloadsPronto = (window.claude && window.claude.use) ? window.claude.use('downloads').catch(() => null) : Promise.resolve(null);
 
 function status(msg, tipo) { $('status').textContent = msg; $('status').className = tipo || ''; }
 const ler = (arquivo) => arquivo.arrayBuffer().then(b => new Uint8Array(b));
 
-async function abrirDocumento(bytes, nome, exemplo) {
-  estado.bytes = bytes; estado.nome = nome; estado.exemplo = exemplo; estado.assinado = null;
-  $('salvar').hidden = true;
-  $('nomeArquivo').innerHTML = '';
-  if (exemplo) { const e = document.createElement('span'); e.className = 'exemplo'; e.textContent = 'Exemplo'; $('nomeArquivo').append(e); }
-  $('nomeArquivo').append(document.createTextNode(nome));
-  estado.doc = await pdfjsLib.getDocument({ data: bytes.slice() }).promise;
-  // Posição inicial: canto inferior esquerdo da última página
-  const ultima = await estado.doc.getPage(estado.doc.numPages);
+// Posição sugerida: canto inferior esquerdo da última página
+async function posicaoSugerida(doc) {
+  const ultima = await doc.getPage(doc.numPages);
   const [x0, y0] = ultima.view;
-  estado.posicao = { pagina: estado.doc.numPages - 1, x: x0 + 40, y: y0 + 40, escala: estado.escala, view: ultima.view };
-  estado.pagina = estado.doc.numPages;
-  atualizarChip(false);
+  return { pagina: doc.numPages - 1, x: x0 + 40, y: y0 + 40, escala: estado.escala, view: ultima.view };
+}
+
+// Um documento só (também usado pelo exemplo)
+async function abrirDocumento(bytes, nome, exemplo) {
+  estado.arquivos = [{ nome, bytes, exemplo }];
+  await abrirItem(0);
+}
+
+// Mostra na tela o documento i da lista (cada um guarda a sua posição de carimbo)
+async function abrirItem(i) {
+  const item = estado.arquivos[i];
+  estado.atual = i;
+  estado.bytes = item.bytes; estado.nome = item.nome; estado.exemplo = !!item.exemplo; estado.assinado = item.assinado || null;
+  $('nomeArquivo').innerHTML = '';
+  if (item.exemplo) { const e = document.createElement('span'); e.className = 'exemplo'; e.textContent = 'Exemplo'; $('nomeArquivo').append(e); }
+  $('nomeArquivo').append(document.createTextNode(item.nome));
+  $('nomeArquivo').title = item.nome;
+  desenharFila();
+  try { estado.doc = await pdfjsLib.getDocument({ data: item.bytes.slice() }).promise; }
+  catch (e) { item.erro = 'não consegui abrir este PDF'; desenharFila(); throw e; }
+  if (estado.atual !== i) return; // trocou de arquivo enquanto abria
+  if (!item.posicao) item.posicao = await posicaoSugerida(estado.doc);
+  estado.posicao = item.posicao;
+  estado.pagina = item.posicao.pagina + 1;
+  atualizarChip(!!item.escolhido);
+  desenharFila();
   await renderizar();
+}
+
+function itemAtual() { return estado.arquivos[estado.atual]; }
+
+// Lista dos documentos do lote, no passo 1
+function desenharFila() {
+  const lista = estado.arquivos, fila = $('fila'), lote = lista.length > 1;
+  fila.hidden = !lote; $('navArquivo').hidden = !lote;
+  $('dicaCarimbo').textContent = lote
+    ? 'Toque na página onde a assinatura deve aparecer. Faça isso em cada documento: use » para ir ao próximo ou toque no nome dele na lista.'
+    : 'Toque na página, ao lado, onde a assinatura deve aparecer.';
+  const n = lista.filter(it => !it.exemplo).length;
+  $('assinar').textContent = n > 1 ? `Assinar ${n} documentos` : 'Assinar documento';
+  if (!lote) return;
+  fila.innerHTML = '';
+  lista.forEach((it, i) => {
+    const b = document.createElement('button');
+    b.type = 'button'; b.className = 'doc'; b.setAttribute('aria-current', String(i === estado.atual));
+    b.innerHTML = '<span class="nome"></span><span class="det"></span>';
+    b.querySelector('.nome').textContent = `${i + 1}. ${it.nome}`;
+    b.querySelector('.det').textContent =
+      it.erro ? 'Erro: ' + it.erro
+      : it.assinado ? 'Assinado ✓'
+      : !it.posicao ? 'Posição sugerida: última página'
+      : `Página ${it.posicao.pagina + 1} · ${it.escolhido ? 'posição definida' : 'posição sugerida'}`;
+    b.dataset.estado = it.erro ? 'erro' : it.assinado ? 'ok' : it.escolhido ? 'definido' : '';
+    b.addEventListener('click', () => trocarArquivo(i));
+    fila.append(b);
+  });
+  const atual = fila.children[estado.atual];
+  if (atual) atual.scrollIntoView({ block: 'nearest' });
+  $('arqInfo').textContent = `Doc. ${estado.atual + 1} de ${lista.length}`;
+  $('arqAnt').disabled = estado.atual <= 0;
+  $('arqProx').disabled = estado.atual >= lista.length - 1;
+}
+
+async function trocarArquivo(i) {
+  if (i === estado.atual || i < 0 || i >= estado.arquivos.length) return;
+  try { await abrirItem(i); }
+  catch (e) { console.error(e); status('Não consegui abrir “' + estado.arquivos[i].nome + '”. Ele será ignorado no lote.', 'erro'); }
+}
+$('arqAnt').addEventListener('click', () => trocarArquivo(estado.atual - 1));
+$('arqProx').addEventListener('click', () => trocarArquivo(estado.atual + 1));
+
+// Algo mudou num documento: a assinatura dele precisa ser refeita
+function invalidarAtual() {
+  const it = itemAtual();
+  if (it) { it.assinado = null; it.posicao = estado.posicao; }
+  estado.assinado = null; estado.avisouSugeridas = false;
+  $('salvar').hidden = true;
+  desenharFila();
 }
 
 async function renderizar() {
@@ -701,7 +850,8 @@ $('tela').addEventListener('click', (ev) => {
   const [px, py] = vp.convertToPdfPoint((ev.clientX - r.left) * fator, (ev.clientY - r.top) * fator);
   estado.posicao = { pagina: estado.pagina - 1, escala: estado.escala, view: estado.view };
   centralizar(px, py);
-  estado.assinado = null; $('salvar').hidden = true;
+  if (itemAtual()) itemAtual().escolhido = true;
+  invalidarAtual();
   atualizarChip(true); desenharCarimbo();
 });
 
@@ -722,7 +872,7 @@ function mudarTamanho(pct) {
     const cx = p.x + CARIMBO.w * p.escala / 2, cy = p.y + CARIMBO.h * p.escala / 2;
     p.escala = estado.escala;
     centralizar(cx, cy);
-    estado.assinado = null; $('salvar').hidden = true;
+    invalidarAtual();
     desenharCarimbo();
   }
 }
@@ -736,39 +886,105 @@ $('prox').addEventListener('click', () => { if (estado.doc && estado.pagina < es
 let espera; window.addEventListener('resize', () => { clearTimeout(espera); espera = setTimeout(renderizar, 150); });
 
 $('pdf').addEventListener('change', async () => {
-  const f = $('pdf').files[0]; if (!f) return;
-  status('');
+  const escolhidos = [...$('pdf').files].filter(f => /\.pdf$/i.test(f.name) || f.type === 'application/pdf');
+  if (!escolhidos.length) return;
+  status(''); $('salvar').hidden = true; estado.avisouSugeridas = false;
+  const itens = [];
+  for (const f of escolhidos) {
+    try { itens.push({ nome: f.name, bytes: await ler(f) }); }
+    catch (e) { console.error(e); }
+  }
+  if (!itens.length) return status('Não consegui ler os arquivos escolhidos.', 'erro');
+  estado.arquivos = itens;
   try {
-    const bytes = await ler(f);
-    await abrirDocumento(bytes, f.name, false);
-    if (pdfJaAssinado(bytes)) status('Este PDF já tem assinatura. A nova assinatura será acrescentada e as anteriores continuam válidas.', 'ok');
+    await abrirItem(0);
+    if (itens.length > 1) {
+      status(`${itens.length} documentos no lote. Posicione o carimbo em cada um e clique em “Assinar ${itens.length} documentos”.`, 'ok');
+    } else if (pdfJaAssinado(itens[0].bytes)) {
+      status('Este PDF já tem assinatura. A nova assinatura será acrescentada e as anteriores continuam válidas.', 'ok');
+    }
   } catch (e) { console.error(e); status('Não consegui abrir este PDF. Confira se o arquivo não está corrompido.', 'erro'); }
 });
 
 $('assinar').addEventListener('click', async () => {
   const pfx = $('pfx').files[0], senha = $('senha').value;
   $('salvar').hidden = true;
-  if (!estado.bytes || estado.exemplo) return status('Escolha o seu PDF no passo 1. O documento na tela é só um exemplo.', 'erro');
+  const todos = estado.arquivos.filter(it => !it.exemplo && !(it.erro && !it.posicao));
+  if (!todos.length) return status('Escolha o seu PDF no passo 1. O documento na tela é só um exemplo.', 'erro');
   if (estado.modo === 'arquivo') {
     if (!pfx) return status('Escolha o arquivo do certificado A1 no passo 3.', 'erro');
     if (!senha) return status('Digite a senha do certificado.', 'erro');
   } else if (!estado.certLocal) {
     return status('Escolha um certificado da lista no passo 3.', 'erro');
   }
+  const lote = todos.length > 1;
+  // Assina só o que ainda não foi assinado; se tudo já foi, assina tudo de novo
+  let alvo = todos.filter(it => !it.assinado);
+  if (!alvo.length) alvo = todos;
+
+  // No lote, avisa uma vez sobre documentos em que o carimbo não foi posicionado
+  const sugeridos = alvo.filter(it => !it.escolhido);
+  if (lote && sugeridos.length && !estado.avisouSugeridas) {
+    estado.avisouSugeridas = true;
+    return status(`${sugeridos.length === 1 ? '1 documento está' : sugeridos.length + ' documentos estão'} com a posição sugerida `
+      + '(canto inferior esquerdo da última página). Clique em Assinar de novo para seguir assim, ou toque na página de cada um para escolher.', 'erro');
+  }
+
   $('assinar').disabled = true;
-  status(estado.modo === 'arquivo' ? 'Assinando…' : 'Confirme a assinatura na janela do Projetta Assinador. Se for token ou cartão, digite o PIN.');
+  const extras = { motivo: $('motivo').value.trim(), local: $('local').value.trim() };
+  let cert = null, porArquivo = false, feitos = 0, falhas = 0, parou = null;
   try {
-    const cert = estado.modo === 'arquivo' ? lerCertificado(await ler(pfx), senha) : certificadoDoAgente(estado.certLocal);
-    const r = await assinarPdf(estado.bytes, cert, estado.posicao, { motivo: $('motivo').value.trim(), local: $('local').value.trim() });
-    estado.assinado = r.pdf; estado.titular = r.cn;
-    desenharCarimbo();
-    status('Documento assinado por ' + r.nome + '.', 'ok');
-    $('salvar').hidden = false;
+    cert = estado.modo === 'arquivo' ? lerCertificado(await ler(pfx), senha) : certificadoDoAgente(estado.certLocal);
+    if (cert.doAgente && alvo.length > 1) {
+      status(`Confirme a assinatura dos ${alvo.length} documentos na janela do Projetta Assinador. Se for token ou cartão, digite o PIN.`);
+      porArquivo = !(await cert.iniciarLote(alvo.map(it => it.nome)));
+    }
+    for (let k = 0; k < alvo.length; k++) {
+      const it = alvo[k];
+      status((lote ? `Assinando ${k + 1} de ${alvo.length}: ${it.nome}` : 'Assinando…')
+        + (cert.doAgente && !cert.lote ? ' — confirme na janela do Projetta Assinador. Se for token ou cartão, digite o PIN.' : ''));
+      try {
+        if (!it.posicao) {
+          const doc = await pdfjsLib.getDocument({ data: it.bytes.slice() }).promise;
+          it.posicao = await posicaoSugerida(doc);
+          doc.destroy();
+        }
+        const r = await assinarPdf(it.bytes, cert, it.posicao, extras);
+        it.assinado = r.pdf; it.erro = null; estado.titular = r.cn; feitos++;
+      } catch (e) {
+        console.error(e);
+        it.erro = e.message || 'não foi possível assinar'; falhas++;
+        if (e.doAgente) { parou = e; break; }  // recusado, token removido, programa fechado: não adianta seguir
+      }
+      desenharFila();
+    }
   } catch (e) {
     console.error(e);
-    status(e.message || 'Não foi possível assinar.', 'erro');
+    parou = e;
   } finally {
+    if (cert && cert.encerrarLote) await cert.encerrarLote();
     $('assinar').disabled = false; $('senha').value = '';
+  }
+
+  const it = itemAtual();
+  estado.assinado = (it && it.assinado) || null;
+  desenharFila(); desenharCarimbo();
+  const prontos = todos.filter(x => x.assinado).length;
+  if (!lote) {
+    if (parou || !feitos) status((parou || {}).message || (it && it.erro) || 'Não foi possível assinar.', 'erro');
+    else status('Documento assinado por ' + cert.nome + '.', 'ok');
+  } else if (!feitos && parou) {
+    status(parou.message || 'Não foi possível assinar.', 'erro');
+  } else {
+    const resto = todos.length - prontos;
+    status(`${prontos} de ${todos.length} documentos assinados por ${cert.nome}.`
+      + (resto ? ` ${resto} não ${resto === 1 ? 'foi assinado' : 'foram assinados'} (veja a lista no passo 1); clique em Assinar para tentar de novo só ${resto === 1 ? 'ele' : 'eles'}.` : '')
+      + (porArquivo ? ' Dica: atualize o Projetta Assinador para confirmar o lote de uma vez só.' : ''),
+      resto ? 'erro' : 'ok');
+  }
+  if (prontos) {
+    $('salvar').textContent = lote ? `Salvar ${prontos} PDF${prontos > 1 ? 's' : ''} assinado${prontos > 1 ? 's' : ''} (.zip)` : 'Salvar PDF assinado';
+    $('salvar').hidden = false;
   }
 });
 
@@ -814,8 +1030,11 @@ async function procurarCertificados() {
   const info = $('agenteStatus'), lista = $('listaCerts');
   info.textContent = 'Procurando o Projetta Assinador neste computador…';
   lista.hidden = true; $('semAgente').hidden = true; $('buscaCerts').hidden = true;
+  $('agenteVelho').hidden = true;
   try {
-    await chamarAgente('/api/status', {}, 2500);
+    const st = await chamarAgente('/api/status', {}, 2500);
+    const v = String(st.versao || '0').split('.').map(Number);
+    $('agenteVelho').hidden = (v[0] || 0) * 1000 + (v[1] || 0) >= 1001; // 1.1 ou mais nova já tem lote
   } catch {
     info.textContent = 'O Projetta Assinador não foi encontrado. Ele precisa estar instalado e aberto neste computador.';
     $('semAgente').hidden = false;
@@ -858,12 +1077,21 @@ async function procurarCertificados() {
 escolherModo(/Windows/i.test(navigator.userAgent) ? 'local' : 'arquivo');
 
 $('salvar').addEventListener('click', async () => {
-  if (!estado.assinado) return;
-  const nome = estado.nome.replace(/\.pdf$/i, '') + '_assinado.pdf';
-  const blob = new Blob([estado.assinado], { type: 'application/pdf' });
+  const prontos = estado.arquivos.filter(it => it.assinado && !it.exemplo);
+  if (!prontos.length) return;
+  let nome, blob;
+  if (estado.arquivos.length > 1) {
+    const nomes = nomesAssinados(prontos.map(it => it.nome));
+    blob = criarZip(prontos.map((it, i) => ({ nome: nomes[i], dados: it.assinado })));
+    const d = new Date(), z = (n) => String(n).padStart(2, '0');
+    nome = `documentos_assinados_${d.getFullYear()}-${z(d.getMonth() + 1)}-${z(d.getDate())}_${z(d.getHours())}${z(d.getMinutes())}.zip`;
+  } else {
+    nome = nomesAssinados([prontos[0].nome])[0];
+    blob = new Blob([prontos[0].assinado], { type: 'application/pdf' });
+  }
   const downloads = await downloadsPronto;
   if (downloads) {
-    try { await downloads.save({ filename: nome, data: blob }); status('PDF salvo: ' + nome, 'ok'); }
+    try { await downloads.save({ filename: nome, data: blob }); status('Arquivo salvo: ' + nome, 'ok'); }
     catch (e) { if (e && e.code === 'declined') status('Salvamento cancelado. Toque em salvar para tentar de novo.'); else status('Não consegui salvar o arquivo aqui (' + ((e && e.code) || 'erro') + ').', 'erro'); }
     return;
   }

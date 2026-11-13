@@ -40,10 +40,21 @@ Esse é o link para mandar ao cliente. O programa do Windows já sai pronto para
 5. Escolhe o certificado e clica em **Assinar documento**.
 6. O Projetta Assinador pergunta se pode assinar. Com token ou cartão, o Windows pede o PIN.
 
+## Assinatura em lote
+
+1. No passo 1, selecione vários PDFs de uma vez (segure **Ctrl** ao clicar nos arquivos).
+2. Os documentos aparecem numa lista. Em cada um, toque na página onde o carimbo deve ficar. Use **»** para ir ao próximo ou toque no nome dele na lista. Se algum ficar sem posição, o carimbo vai para o canto inferior esquerdo da última página (o site avisa antes).
+3. Clique em **Assinar N documentos**. Com certificado instalado ou token, o Projetta Assinador pede **uma única confirmação** para o lote inteiro (versão 1.1 ou mais nova).
+4. Clique em **Salvar** para baixar um arquivo **.zip** com todos os PDFs assinados.
+
+Se algum documento falhar, ele fica marcado na lista e um novo clique em Assinar tenta só os que faltaram.
+
+**Atualizar o programa do Windows:** quem tem a versão 1.0 baixa de novo pelo link do site e abre o arquivo. O programa novo oferece fechar a versão antiga e passa a abrir junto com o Windows no lugar dela.
+
 ## Segurança
 
 - O programa só responde ao seu site (`https://SEU-USUARIO.github.io`). Outros sites são recusados.
-- Cada assinatura pede confirmação na tela do computador, mostrando o site e o certificado.
+- Cada assinatura pede confirmação na tela do computador, mostrando o site e o certificado. No lote, a confirmação lista os documentos e vale só para aquela quantidade, aquele site e aquele certificado, por no máximo 15 minutos.
 - A chave privada nunca sai do Windows nem do token.
 
 ## Mudanças futuras
